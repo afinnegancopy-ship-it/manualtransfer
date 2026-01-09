@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 import io
+import xlwt
 
 st.set_page_config(page_title="Brown Thomas File Processor", layout="wide")
 
@@ -134,19 +135,35 @@ if uploaded_file is not None:
                     
                     # Generate output filename with timestamp
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    output_filename = f"Processed_Manual_Transfer_File_{timestamp}.xlsx"
+                    output_filename = f"Processed_Manual_Transfer_File_{timestamp}.xls"
                     
-                    # Create download button
+                    # Create .xls file using xlwt
+                    workbook = xlwt.Workbook()
+                    sheet = workbook.add_sheet('Processed Data')
+                    
+                    # Write headers
+                    for col_idx, col_name in enumerate(output_columns):
+                        sheet.write(0, col_idx, col_name)
+                    
+                    # Write data
+                    for row_idx, row in output_df.iterrows():
+                        for col_idx, col_name in enumerate(output_columns):
+                            value = row[col_name]
+                            if pd.isna(value):
+                                sheet.write(row_idx + 1, col_idx, '')
+                            else:
+                                sheet.write(row_idx + 1, col_idx, value)
+                    
+                    # Save to buffer
                     output = io.BytesIO()
-                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                        output_df.to_excel(writer, index=False, sheet_name='Processed Data')
+                    workbook.save(output)
                     output.seek(0)
                     
                     st.download_button(
                         label="📥 Download Processed File",
                         data=output,
                         file_name=output_filename,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        mime="application/vnd.ms-excel"
                     )
                     
                     st.markdown("---")
