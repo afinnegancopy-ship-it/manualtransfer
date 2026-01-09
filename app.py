@@ -10,7 +10,7 @@ uploaded_file = st.file_uploader(
     type=["xls"]
 )
 
-def normalize(col):
+def normalize_col(col):
     return (
         str(col)
         .lower()
@@ -18,6 +18,13 @@ def normalize(col):
         .replace("\r", " ")
         .strip()
     )
+
+def normalize_ppid(val):
+    if pd.isna(val):
+        return ""
+    val = str(val).strip()
+    val = val.replace(".0", "")
+    return val
 
 if uploaded_file:
 
@@ -29,29 +36,30 @@ if uploaded_file:
         st.stop()
 
     # -----------------------------
-    # READ TEMPLATE (KEEP ORIGINAL COLUMNS)
+    # TEMPLATE
     # -----------------------------
-    template_df = pd.read_excel(xls, sheet_name=TEMPLATE_SHEET)
+    template_df = pd.read_excel(xls, sheet_name=TEMPLATE_SHEET, dtype=str)
     template_columns = template_df.columns.tolist()
 
-    template_norm = template_df.copy()
-    template_norm.columns = [normalize(c) for c in template_norm.columns]
+    template_df.columns = [normalize_col(c) for c in template_df.columns]
 
-    if "ppid" not in template_norm.columns:
-        st.error("Template must contain a PPID column.")
+    if "ppid" not in template_df.columns:
+        st.error("Template must contain PPID column.")
         st.stop()
 
+    template_df["ppid"] = template_df["ppid"].apply(normalize_ppid)
+
     # -----------------------------
-    # READ SOURCE SHEETS
+    # SOURCE SHEETS
     # -----------------------------
-    data_frames = []
+    source_frames = []
 
     for sheet in xls.sheet_names:
         if sheet == TEMPLATE_SHEET:
             continue
 
-        df = pd.read_excel(xls, sheet_name=sheet)
-        df.columns = [normalize(c) for c in df.columns]
+        df = pd.read_excel(xls, sheet_name=sheet, dtype=str)
+        df.columns = [normalize_col(c) for c in df.columns]
 
         if "pim parent id" in df.columns:
             df = df.rename(columns={"pim parent id": "ppid"})
@@ -59,62 +67,69 @@ if uploaded_file:
         if "ppid" not in df.columns:
             continue
 
-        data_frames.append(df)
+        df["ppid"] = df["ppid"].apply(normalize_ppid)
+        source_frames.append(df)
 
-    if not data_frames:
-        st.error("No valid source sheets with PPID found.")
+    if not source_frames:
+        st.error("No source sheets with Pim Parent ID found.")
         st.stop()
 
-    source_df = pd.concat(data_frames, ignore_index=True)
+    source_df = pd.concat(source_frames, ignore_index=True)
     source_df = source_df.drop_duplicates(subset=["ppid"])
 
     # -----------------------------
-    # COLUMN MAPPING (NORMALIZED)
+    # COLUMN MAP
     # -----------------------------
     column_map = {
-        "SKU": "retek id",
-        "BARCODE": "barcode",
-        "DESCRIPTION": "retek item description",
-        "COLOUR": "diff 1 description",
-        "SIZE": "uk size concat",
-        "PRODUCT TYPE": "product type uda",
-        "DIVISION": "division name",
-        "BRAND": "brand",
-        "DEPARTMENT": "department name",
-        "DEPARTMENT NUMBER": "department number",
-        "DIVISION NUMBER": "division number",
-        "STORE 301 ALLOCATION": "store 301 allocation",
-        "STORE 401 ALLOCATION": "store 401 allocation",
-        "ITEM STORE FLAG": "item store flag",
-        "VPN PARENT": "vpn parent",
+        "sku": "retek id",
+        "barcode": "barcode",
+        "description": "retek item description",
+        "colour": "diff 1 description",
+        "size": "uk size concat",
+        "product type": "product type uda",
+        "division": "division name",
+        "brand": "brand",
+        "department": "department name",
+        "department number": "department number",
+        "division number": "division number",
+        "store 301 allocation": "store 301 allocation",
+        "store 401 allocation": "store 401 allocation",
+        "item store flag": "item store flag",
+        "vpn parent": "vpn parent",
     }
 
     # -----------------------------
-    # MERGE USING NORMALIZED PPID
+    # MERGE
     # -----------------------------
-    merged = template_norm.merge(source_df, on="ppid", how="left")
+    merged = template_df.merge(
+        source_df,
+        on="ppid",
+        how="left",
+        indicator=True
+    )
+
+    # DEBUG (remove later)
+    st.write("PPID match summary:")
+    st.write(merged["_merge"].value_counts())
 
     # -----------------------------
-    # FILL TEMPLATE DATA
+    # FILL DATA
     # -----------------------------
     for template_col, source_col in column_map.items():
-        template_col_norm = normalize(template_col)
-        if template_col_norm in merged.columns and source_col in merged.columns:
-            template_norm[template_col_norm] = merged[source_col]
+        if template_col in merged.columns and source_col in merged.columns:
+            template_df[template_col] = merged[source_col]
 
     # Barcode cleanup
-    if "barcode" in template_norm.columns:
-        template_norm["barcode"] = (
-            template_norm["barcode"]
+    if "barcode" in template_df.columns:
+        template_df["barcode"] = (
+            template_df["barcode"]
             .astype(str)
             .str.replace(r"\.0+$", "", regex=True)
         )
 
-    # -----------------------------
-    # RESTORE ORIGINAL COLUMN NAMES
-    # -----------------------------
-    template_norm.columns = template_columns
-    final_df = template_norm
+    # Restore original headers
+    template_df.columns = template_columns
+    final_df = template_df
 
     # -----------------------------
     # EXPORT
@@ -130,7 +145,7 @@ if uploaded_file:
     with open(output_file, "rb") as f:
         st.download_button(
             "Download Processed Manual Transfer File",
-            data=f,
-            file_name=output_file,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            f,
+            output_file,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
