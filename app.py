@@ -2,11 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 
-st.set_page_config(
-    page_title="Brown Thomas Manual Transfer Processor",
-    layout="wide"
-)
-
+st.set_page_config(page_title="Brown Thomas Manual Transfer Processor", layout="wide")
 st.title("Brown Thomas Manual Transfer File Processor")
 
 uploaded_file = st.file_uploader(
@@ -14,21 +10,25 @@ uploaded_file = st.file_uploader(
     type=["xls"]
 )
 
+def normalize(col):
+    return (
+        col.lower()
+        .replace("\n", " ")
+        .replace("\r", " ")
+        .strip()
+    )
+
 if uploaded_file:
 
     xls = pd.ExcelFile(uploaded_file)
 
     TEMPLATE_SHEET = "brownthomas_new_template"
-    if TEMPLATE_SHEET not in xls.sheet_names:
-        st.error(f"Sheet '{TEMPLATE_SHEET}' not found.")
-        st.stop()
 
-    # Read template
     template_df = pd.read_excel(xls, sheet_name=TEMPLATE_SHEET)
-    template_df.columns = template_df.columns.str.strip()
+    template_df.columns = [normalize(c) for c in template_df.columns]
 
-    if "PPID" not in template_df.columns:
-        st.error("Template must contain a 'PPID' column.")
+    if "ppid" not in template_df.columns:
+        st.error("Template must contain PPID column.")
         st.stop()
 
     # -----------------------------
@@ -41,14 +41,12 @@ if uploaded_file:
             continue
 
         df = pd.read_excel(xls, sheet_name=sheet)
-        df.columns = df.columns.str.strip()
+        df.columns = [normalize(c) for c in df.columns]
 
-        # Map Pim Parent ID → PPID
-        if "Pim Parent ID" in df.columns:
-            df = df.rename(columns={"Pim Parent ID": "PPID"})
+        if "pim parent id" in df.columns:
+            df = df.rename(columns={"pim parent id": "ppid"})
 
-        if "PPID" not in df.columns:
-            st.warning(f"Sheet '{sheet}' skipped — no PPID found.")
+        if "ppid" not in df.columns:
             continue
 
         data_frames.append(df)
@@ -58,68 +56,71 @@ if uploaded_file:
         st.stop()
 
     data_df = pd.concat(data_frames, ignore_index=True)
-    data_df = data_df.drop_duplicates(subset=["PPID"])
+    data_df = data_df.drop_duplicates(subset=["ppid"])
 
     # -----------------------------
-    # COLUMN MAPPING
+    # COLUMN MAP (NORMALIZED)
     # -----------------------------
     column_map = {
-        "SKU": "Retek ID",
-        "BARCODE": "Barcode",
-        "DESCRIPTION": "Retek Item Description",
-        "COLOUR": "Diff 1 Description",
-        "SIZE": "UK Size Concat",
-        "PRODUCT TYPE": "Product Type UDA",
-        "DIVISION": "Division Name",
-        "BRAND": "Brand",
-        "DEPARTMENT": "Department Name",
-        "DEPARTMENT NUMBER": "Department Number",
-        "DIVISION NUMBER": "Division Number",
-        "STORE 301 ALLOCATION": "Store 301 Allocation",
-        "STORE 401 ALLOCATION": "Store 401 Allocation",
-        "ITEM STORE FLAG": "Item Store Flag",
-        "VPN PARENT": "VPN Parent"
+        "sku": "retek id",
+        "barcode": "barcode",
+        "description": "retek item description",
+        "colour": "diff 1 description",
+        "size": "uk size concat",
+        "product type": "product type uda",
+        "division": "division name",
+        "brand": "brand",
+        "department": "department name",
+        "department number": "department number",
+        "division number": "division number",
+        "store 301 allocation": "store 301 allocation",
+        "store 401 allocation": "store 401 allocation",
+        "item store flag": "item store flag",
+        "vpn parent": "vpn parent"
     }
 
+    # -----------------------------
+    # MERGE
+    # -----------------------------
     merged_df = template_df.merge(
         data_df,
-        on="PPID",
+        on="ppid",
         how="left"
     )
 
+    # -----------------------------
+    # FILL TEMPLATE COLUMNS
+    # -----------------------------
     for template_col, source_col in column_map.items():
         if template_col in merged_df.columns and source_col in merged_df.columns:
             merged_df[template_col] = merged_df[source_col]
 
     # Barcode cleanup
-    if "BARCODE" in merged_df.columns:
-        merged_df["BARCODE"] = (
-            merged_df["BARCODE"]
+    if "barcode" in merged_df.columns:
+        merged_df["barcode"] = (
+            merged_df["barcode"]
             .astype(str)
             .str.replace(r"\.0+$", "", regex=True)
         )
 
+    # Restore original column casing/order
     final_df = merged_df[template_df.columns]
 
     # -----------------------------
-    # EXPORT (XLSX – SAFE)
+    # EXPORT
     # -----------------------------
     timestamp = datetime.now().strftime("%Y-%m-%d %H-%M-%S")
     output_filename = f"Processed Manual Transfer File - {timestamp}.xlsx"
 
     with pd.ExcelWriter(output_filename, engine="openpyxl") as writer:
-        final_df.to_excel(
-            writer,
-            index=False,
-            sheet_name=TEMPLATE_SHEET
-        )
+        final_df.to_excel(writer, index=False, sheet_name=TEMPLATE_SHEET)
 
     st.success("File processed successfully!")
 
     with open(output_filename, "rb") as f:
         st.download_button(
-            label="Download Processed Manual Transfer File",
-            data=f,
-            file_name=output_filename,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            "Download Processed Manual Transfer File",
+            f,
+            output_filename,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
