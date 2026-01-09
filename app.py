@@ -3,232 +3,211 @@ import pandas as pd
 from datetime import datetime
 import io
 
-st.set_page_config(page_title="Brown Thomas Manual Transfer Processor", layout="wide")
+st.set_page_config(page_title="Brown Thomas File Processor", layout="wide")
 
 st.title("Brown Thomas Manual Transfer File Processor")
 st.markdown("---")
 
-# Column mapping from source sheets to template
-COLUMN_MAPPING = {
-    'SKU': 'Retek ID',
-    'BARCODE': 'Barcode',
-    'DESCRIPTION': 'Retek Item Description',
-    'COLOUR': 'Diff 1 Description',
-    'SIZE': 'UK Size Concat',
-    'PRODUCT TYPE': 'Product Type UDA',
-    'DIVISION': 'Division Name',
-    'BRAND': 'Brand',
-    'DEPARTMENT': 'Department Name',
-    'DEPARTMENT NUMBER': 'Department Number',
-    'DIVISION NUMBER': 'Division Number',
-    'STORE 301 ALLOCATION': 'Store 301 Allocation',
-    'STORE 401 ALLOCATION': 'Store 401 Allocation',
-    'ITEM STORE FLAG': 'Item Store Flag',
-    'VPN PARENT': 'VPN Parent'
-}
+# File uploader
+uploaded_file = st.file_uploader("Upload your XLS file", type=['xls', 'xlsx'])
 
-def load_excel_file(uploaded_file):
-    """Load all sheets from the uploaded Excel file"""
+if uploaded_file is not None:
     try:
+        # Read all sheets from the Excel file
         xls = pd.ExcelFile(uploaded_file)
-        sheets = {}
-        for sheet_name in xls.sheet_names:
-            sheets[sheet_name] = pd.read_excel(xls, sheet_name=sheet_name)
-        return sheets, xls.sheet_names
+        sheet_names = xls.sheet_names
+        
+        st.info(f"Found {len(sheet_names)} sheets: {', '.join(sheet_names)}")
+        
+        # Let user select the template sheet and source sheets
+        st.subheader("Sheet Selection")
+        
+        template_sheet = st.selectbox(
+            "Select the Template Sheet (brownthomas_new_template):",
+            sheet_names,
+            index=0
+        )
+        
+        source_sheets = st.multiselect(
+            "Select the Source Sheets (containing PPID data):",
+            [s for s in sheet_names if s != template_sheet],
+            default=[s for s in sheet_names if s != template_sheet]
+        )
+        
+        if st.button("Process File", type="primary"):
+            with st.spinner("Processing..."):
+                # Read the template sheet
+                template_df = pd.read_excel(uploaded_file, sheet_name=template_sheet)
+                
+                st.write("Template columns found:", template_df.columns.tolist())
+                
+                # Combine all source sheets into one dataframe
+                source_dfs = []
+                for sheet in source_sheets:
+                    df = pd.read_excel(uploaded_file, sheet_name=sheet)
+                    source_dfs.append(df)
+                    st.write(f"Source sheet '{sheet}' columns:", df.columns.tolist())
+                
+                # Combine source data and remove duplicates based on Pim Parent ID
+                combined_source = pd.concat(source_dfs, ignore_index=True)
+                
+                # Column mapping from template to source
+                column_mapping = {
+                    'SKU': 'Retek ID',
+                    'BARCODE': 'Barcode',
+                    'DESCRIPTION': 'Retek Item Description',
+                    'COLOUR': 'Diff 1 Description',
+                    'SIZE': 'UK Size Concat',
+                    'PRODUCT TYPE': 'Product Type UDA',
+                    'DIVISION': 'Division Name',
+                    'BRAND': 'Brand',
+                    'DEPARTMENT': 'Department Name',
+                    'DEPARTMENT NUMBER': 'Department Number',
+                    'DIVISION NUMBER': 'Division Number',
+                    'STORE 301 ALLOCATION': 'Store 301 Allocation',
+                    'STORE 401 ALLOCATION': 'Store 401 Allocation',
+                    'ITEM STORE FLAG': 'Item Store Flag',
+                    'VPN PARENT': 'VPN Parent'
+                }
+                
+                # Find the PPID column in template (case-insensitive search)
+                ppid_col_template = None
+                for col in template_df.columns:
+                    if 'PPID' in col.upper():
+                        ppid_col_template = col
+                        break
+                
+                # Find the Pim Parent ID column in source (case-insensitive search)
+                ppid_col_source = None
+                for col in combined_source.columns:
+                    if 'pim parent id' in col.lower():
+                        ppid_col_source = col
+                        break
+                
+                if ppid_col_template is None:
+                    st.error("Could not find PPID column in template sheet!")
+                elif ppid_col_source is None:
+                    st.error("Could not find 'Pim Parent ID' column in source sheets!")
+                else:
+                    st.success(f"Found PPID column in template: '{ppid_col_template}'")
+                    st.success(f"Found Pim Parent ID column in source: '{ppid_col_source}'")
+                    
+                    # Remove duplicate PPIDs from source, keeping first occurrence
+                    combined_source_unique = combined_source.drop_duplicates(subset=[ppid_col_source], keep='first')
+                    
+                    st.info(f"Total source rows: {len(combined_source)}, After removing duplicates: {len(combined_source_unique)}")
+                    
+                    # Create a lookup dictionary from source data
+                    source_lookup = combined_source_unique.set_index(ppid_col_source)
+                    
+                    # Process each row in template
+                    processed_count = 0
+                    not_found_count = 0
+                    
+                    for idx, row in template_df.iterrows():
+                        ppid = row[ppid_col_template]
+                        
+                        # Skip if PPID is empty
+                        if pd.isna(ppid):
+                            continue
+                        
+                        # Look up the PPID in source data
+                        if ppid in source_lookup.index:
+                            source_row = source_lookup.loc[ppid]
+                            
+                            # Map each column
+                            for template_col, source_col in column_mapping.items():
+                                # Find matching column in template (case-insensitive)
+                                template_col_actual = None
+                                for col in template_df.columns:
+                                    if col.upper() == template_col.upper():
+                                        template_col_actual = col
+                                        break
+                                
+                                # Find matching column in source (case-insensitive)
+                                source_col_actual = None
+                                for col in source_lookup.columns:
+                                    if col.lower() == source_col.lower():
+                                        source_col_actual = col
+                                        break
+                                
+                                if template_col_actual and source_col_actual:
+                                    value = source_row[source_col_actual]
+                                    
+                                    # Special handling for BARCODE - convert to integer
+                                    if template_col.upper() == 'BARCODE' and pd.notna(value):
+                                        try:
+                                            value = int(float(value))
+                                        except (ValueError, TypeError):
+                                            pass
+                                    
+                                    template_df.at[idx, template_col_actual] = value
+                            
+                            processed_count += 1
+                        else:
+                            not_found_count += 1
+                    
+                    st.success(f"✅ Processed {processed_count} rows successfully")
+                    if not_found_count > 0:
+                        st.warning(f"⚠️ {not_found_count} PPIDs not found in source sheets")
+                    
+                    # Display preview of processed data
+                    st.subheader("Preview of Processed Data")
+                    st.dataframe(template_df.head(20))
+                    
+                    # Generate output filename with timestamp
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    output_filename = f"Processed_Manual_Transfer_File_{timestamp}.xlsx"
+                    
+                    # Create download button
+                    output = io.BytesIO()
+                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                        template_df.to_excel(writer, index=False, sheet_name='Processed Data')
+                    output.seek(0)
+                    
+                    st.download_button(
+                        label="📥 Download Processed File",
+                        data=output,
+                        file_name=output_filename,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                    
+                    st.markdown("---")
+                    st.subheader("Processing Summary")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Total Template Rows", len(template_df))
+                    with col2:
+                        st.metric("Successfully Matched", processed_count)
+                    with col3:
+                        st.metric("Not Found", not_found_count)
+                        
     except Exception as e:
-        st.error(f"Error loading Excel file: {str(e)}")
-        return None, None
+        st.error(f"Error processing file: {str(e)}")
+        st.exception(e)
 
-def clean_barcode(barcode_value):
-    """Convert barcode to number and remove decimal digits"""
-    try:
-        if pd.isna(barcode_value):
-            return None
-        # Convert to float first, then to int to remove decimals
-        return int(float(barcode_value))
-    except (ValueError, TypeError):
-        return barcode_value
-
-def build_lookup_dict(source_sheets, template_sheet_name):
-    """Build a lookup dictionary from all source sheets (excluding template) keyed by PPID"""
-    lookup = {}
+else:
+    st.info("👆 Please upload an XLS/XLSX file to begin processing")
     
-    for sheet_name, df in source_sheets.items():
-        if sheet_name == template_sheet_name:
-            continue
-            
-        # Find the PPID column (case-insensitive search)
-        ppid_col = None
-        for col in df.columns:
-            if str(col).upper().strip() == 'PPID':
-                ppid_col = col
-                break
-        
-        if ppid_col is None:
-            st.warning(f"Sheet '{sheet_name}' does not have a PPID column. Skipping...")
-            continue
-        
-        st.info(f"Processing sheet: '{sheet_name}' with {len(df)} rows")
-        
-        # Create column mapping for this sheet (case-insensitive)
-        col_map = {}
-        for col in df.columns:
-            col_upper = str(col).upper().strip()
-            col_map[col_upper] = col
-        
-        # Process each row
-        for idx, row in df.iterrows():
-            ppid = row[ppid_col]
-            if pd.isna(ppid):
-                continue
-            
-            # Convert PPID to string for consistent matching
-            ppid_key = str(ppid).strip()
-            
-            # Only add if not already in lookup (avoid duplicates)
-            if ppid_key not in lookup:
-                row_data = {}
-                
-                for template_col, source_col in COLUMN_MAPPING.items():
-                    source_col_upper = source_col.upper().strip()
-                    if source_col_upper in col_map:
-                        actual_col = col_map[source_col_upper]
-                        value = row[actual_col]
-                        
-                        # Special handling for barcode
-                        if template_col == 'BARCODE':
-                            value = clean_barcode(value)
-                        
-                        row_data[template_col] = value
-                    else:
-                        row_data[template_col] = None
-                
-                lookup[ppid_key] = row_data
-    
-    return lookup
-
-def process_template(template_df, lookup):
-    """Process the template by filling in data from lookup"""
-    # Find PPID column in template (case-insensitive)
-    ppid_col = None
-    for col in template_df.columns:
-        if str(col).upper().strip() == 'PPID':
-            ppid_col = col
-            break
-    
-    if ppid_col is None:
-        st.error("Template sheet does not have a PPID column!")
-        return None
-    
-    # Create a copy of the template
-    result_df = template_df.copy()
-    
-    # Create column mapping for template (case-insensitive)
-    template_col_map = {}
-    for col in result_df.columns:
-        col_upper = str(col).upper().strip()
-        template_col_map[col_upper] = col
-    
-    # Track statistics
-    matched = 0
-    unmatched = 0
-    
-    # Process each row in the template
-    for idx, row in result_df.iterrows():
-        ppid = row[ppid_col]
-        if pd.isna(ppid):
-            continue
-        
-        ppid_key = str(ppid).strip()
-        
-        if ppid_key in lookup:
-            matched += 1
-            row_data = lookup[ppid_key]
-            
-            for template_col, value in row_data.items():
-                if template_col in template_col_map:
-                    actual_col = template_col_map[template_col]
-                    if value is not None:
-                        result_df.at[idx, actual_col] = value
-        else:
-            unmatched += 1
-    
-    st.success(f"✅ Matched {matched} PPIDs")
-    if unmatched > 0:
-        st.warning(f"⚠️ {unmatched} PPIDs not found in source sheets")
-    
-    return result_df
-
-def main():
+    st.markdown("---")
+    st.subheader("Column Mapping Reference")
     st.markdown("""
-    ### Instructions:
-    1. Upload your XLS file containing the 'brownthomas_new_template' sheet and source data sheets
-    2. Select the template sheet (brownthomas_new_template)
-    3. The script will map data from source sheets to the template based on PPID
-    4. Download the processed file
+    | Template Column | Source Column |
+    |-----------------|---------------|
+    | PPID | Pim Parent ID |
+    | SKU | Retek ID |
+    | BARCODE | Barcode (converted to integer) |
+    | DESCRIPTION | Retek Item Description |
+    | COLOUR | Diff 1 Description |
+    | SIZE | UK Size Concat |
+    | PRODUCT TYPE | Product Type UDA |
+    | DIVISION | Division Name |
+    | BRAND | Brand |
+    | DEPARTMENT | Department Name |
+    | DEPARTMENT NUMBER | Department Number |
+    | DIVISION NUMBER | Division Number |
+    | STORE 301 ALLOCATION | Store 301 Allocation |
+    | STORE 401 ALLOCATION | Store 401 Allocation |
+    | ITEM STORE FLAG | Item Store Flag |
+    | VPN PARENT | VPN Parent |
     """)
-    
-    uploaded_file = st.file_uploader("Upload your Excel file (.xls or .xlsx)", type=['xls', 'xlsx'])
-    
-    if uploaded_file is not None:
-        # Load all sheets
-        sheets, sheet_names = load_excel_file(uploaded_file)
-        
-        if sheets is not None:
-            st.success(f"✅ Loaded {len(sheet_names)} sheets: {', '.join(sheet_names)}")
-            
-            # Let user select the template sheet
-            template_sheet = st.selectbox(
-                "Select the template sheet (brownthomas_new_template):",
-                options=sheet_names,
-                index=0 if 'brownthomas_new_template' not in sheet_names else sheet_names.index('brownthomas_new_template') if 'brownthomas_new_template' in sheet_names else 0
-            )
-            
-            # Show preview of template
-            st.subheader("Template Preview")
-            st.dataframe(sheets[template_sheet].head(10))
-            
-            # Show source sheets info
-            st.subheader("Source Sheets")
-            source_sheets = [s for s in sheet_names if s != template_sheet]
-            for sheet in source_sheets:
-                with st.expander(f"Sheet: {sheet} ({len(sheets[sheet])} rows)"):
-                    st.write("Columns:", list(sheets[sheet].columns))
-                    st.dataframe(sheets[sheet].head(5))
-            
-            if st.button("🚀 Process File", type="primary"):
-                with st.spinner("Processing..."):
-                    # Build lookup from source sheets
-                    st.subheader("Building Lookup Dictionary...")
-                    lookup = build_lookup_dict(sheets, template_sheet)
-                    st.info(f"Found {len(lookup)} unique PPIDs in source sheets")
-                    
-                    # Process template
-                    st.subheader("Processing Template...")
-                    result_df = process_template(sheets[template_sheet], lookup)
-                    
-                    if result_df is not None:
-                        st.subheader("Processed Result Preview")
-                        st.dataframe(result_df.head(20))
-                        
-                        # Generate filename with date and time
-                        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-                        output_filename = f"Processed Manual Transfer File_{timestamp}.xlsx"
-                        
-                        # Create download button
-                        output = io.BytesIO()
-                        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                            result_df.to_excel(writer, index=False, sheet_name='Processed Data')
-                        output.seek(0)
-                        
-                        st.download_button(
-                            label="📥 Download Processed File",
-                            data=output,
-                            file_name=output_filename,
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
-                        
-                        st.success(f"✅ Processing complete! Click above to download: {output_filename}")
-
-if __name__ == "__main__":
-    main()
