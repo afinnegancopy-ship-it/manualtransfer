@@ -2,8 +2,8 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 
-st.set_page_config(page_title="Brown Thomas Manual Transfer Processor", layout="wide")
-st.title("Brown Thomas Manual Transfer File Processor")
+st.set_page_config(page_title="Manual Transfer Processor", layout="wide")
+st.title("Brown Thomas – Manual Transfer File Processor")
 
 uploaded_file = st.file_uploader(
     "Upload XLS file (template + 2 data sheets)",
@@ -11,8 +11,10 @@ uploaded_file = st.file_uploader(
 )
 
 def normalize(col):
+    """Normalize column names for safe matching"""
     return (
-        col.lower()
+        str(col)
+        .lower()
         .replace("\n", " ")
         .replace("\r", " ")
         .strip()
@@ -20,15 +22,24 @@ def normalize(col):
 
 if uploaded_file:
 
+    # Load Excel file
     xls = pd.ExcelFile(uploaded_file)
 
     TEMPLATE_SHEET = "brownthomas_new_template"
 
+    if TEMPLATE_SHEET not in xls.sheet_names:
+        st.error("Sheet 'brownthomas_new_template' not found.")
+        st.stop()
+
+    # -----------------------------
+    # READ TEMPLATE SHEET
+    # -----------------------------
     template_df = pd.read_excel(xls, sheet_name=TEMPLATE_SHEET)
+    original_columns = template_df.columns.tolist()
     template_df.columns = [normalize(c) for c in template_df.columns]
 
     if "ppid" not in template_df.columns:
-        st.error("Template must contain PPID column.")
+        st.error("Template sheet must contain a PPID column.")
         st.stop()
 
     # -----------------------------
@@ -43,6 +54,7 @@ if uploaded_file:
         df = pd.read_excel(xls, sheet_name=sheet)
         df.columns = [normalize(c) for c in df.columns]
 
+        # Pim Parent ID → PPID
         if "pim parent id" in df.columns:
             df = df.rename(columns={"pim parent id": "ppid"})
 
@@ -52,14 +64,16 @@ if uploaded_file:
         data_frames.append(df)
 
     if not data_frames:
-        st.error("No valid source sheets with PPID found.")
+        st.error("No valid source sheets with PPID/Pim Parent ID found.")
         st.stop()
 
-    data_df = pd.concat(data_frames, ignore_index=True)
-    data_df = data_df.drop_duplicates(subset=["ppid"])
+    source_df = pd.concat(data_frames, ignore_index=True)
+
+    # Remove duplicate PPIDs
+    source_df = source_df.drop_duplicates(subset=["ppid"])
 
     # -----------------------------
-    # COLUMN MAP (NORMALIZED)
+    # COLUMN MAPPING
     # -----------------------------
     column_map = {
         "sku": "retek id",
@@ -76,26 +90,26 @@ if uploaded_file:
         "store 301 allocation": "store 301 allocation",
         "store 401 allocation": "store 401 allocation",
         "item store flag": "item store flag",
-        "vpn parent": "vpn parent"
+        "vpn parent": "vpn parent",
     }
 
     # -----------------------------
-    # MERGE
+    # MERGE DATA
     # -----------------------------
     merged_df = template_df.merge(
-        data_df,
+        source_df,
         on="ppid",
         how="left"
     )
 
-    # -----------------------------
-    # FILL TEMPLATE COLUMNS
-    # -----------------------------
+    # Fill template columns
     for template_col, source_col in column_map.items():
         if template_col in merged_df.columns and source_col in merged_df.columns:
             merged_df[template_col] = merged_df[source_col]
 
-    # Barcode cleanup
+    # -----------------------------
+    # BARCODE CLEANUP
+    # -----------------------------
     if "barcode" in merged_df.columns:
         merged_df["barcode"] = (
             merged_df["barcode"]
@@ -103,24 +117,29 @@ if uploaded_file:
             .str.replace(r"\.0+$", "", regex=True)
         )
 
-    # Restore original column casing/order
-    final_df = merged_df[template_df.columns]
+    # Restore original column order & names
+    merged_df.columns = original_columns
+    final_df = merged_df[original_columns]
 
     # -----------------------------
-    # EXPORT
+    # EXPORT FILE
     # -----------------------------
     timestamp = datetime.now().strftime("%Y-%m-%d %H-%M-%S")
-    output_filename = f"Processed Manual Transfer File - {timestamp}.xlsx"
+    output_file = f"Processed Manual Transfer File - {timestamp}.xlsx"
 
-    with pd.ExcelWriter(output_filename, engine="openpyxl") as writer:
-        final_df.to_excel(writer, index=False, sheet_name=TEMPLATE_SHEET)
+    with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
+        final_df.to_excel(
+            writer,
+            index=False,
+            sheet_name=TEMPLATE_SHEET
+        )
 
-    st.success("File processed successfully!")
+    st.success("File processed successfully.")
 
-    with open(output_filename, "rb") as f:
+    with open(output_file, "rb") as f:
         st.download_button(
             "Download Processed Manual Transfer File",
-            f,
-            output_filename,
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            data=f,
+            file_name=output_file,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
