@@ -19,40 +19,33 @@ if uploaded_file is not None:
         
         st.info(f"Found {len(sheet_names)} sheets: {', '.join(sheet_names)}")
         
-        # Let user select the template sheet and source sheets
+        # Let user select the source sheets
         st.subheader("Sheet Selection")
         
-        template_sheet = st.selectbox(
-            "Select the Template Sheet (brownthomas_new_template):",
-            sheet_names,
-            index=0
-        )
+        # Default to sheets that are not the template
+        default_sheets = [s for s in sheet_names if 'template' not in s.lower()]
         
         source_sheets = st.multiselect(
-            "Select the Source Sheets (containing PPID data):",
-            [s for s in sheet_names if s != template_sheet],
-            default=[s for s in sheet_names if s != template_sheet]
+            "Select the Source Sheets (containing PPID/Pim Parent ID data):",
+            sheet_names,
+            default=default_sheets if default_sheets else sheet_names
         )
         
         if st.button("Process File", type="primary"):
             with st.spinner("Processing..."):
-                # Read the template sheet
-                template_df = pd.read_excel(uploaded_file, sheet_name=template_sheet)
-                
-                st.write("Template columns found:", template_df.columns.tolist())
-                
-                # Combine all source sheets into one dataframe
+                # Read source sheets
                 source_dfs = []
                 for sheet in source_sheets:
                     df = pd.read_excel(uploaded_file, sheet_name=sheet)
                     source_dfs.append(df)
-                    st.write(f"Source sheet '{sheet}' columns:", df.columns.tolist())
+                    st.write(f"**{sheet}** - {len(df)} rows")
                 
-                # Combine source data and remove duplicates based on Pim Parent ID
-                combined_source = pd.concat(source_dfs, ignore_index=True)
+                # Combine all source data
+                all_source = pd.concat(source_dfs, ignore_index=True)
                 
-                # Column mapping from template to source
+                # Column mapping: Template column -> Source column name
                 column_mapping = {
+                    'PPID': 'Pim Parent ID',
                     'SKU': 'Retek ID',
                     'BARCODE': 'Barcode',
                     'DESCRIPTION': 'Retek Item Description',
@@ -70,90 +63,74 @@ if uploaded_file is not None:
                     'VPN PARENT': 'VPN Parent'
                 }
                 
-                # Find the PPID column in template (case-insensitive search)
-                ppid_col_template = None
-                for col in template_df.columns:
-                    if 'PPID' in col.upper():
-                        ppid_col_template = col
-                        break
-                
-                # Find the Pim Parent ID column in source (case-insensitive search)
-                ppid_col_source = None
-                for col in combined_source.columns:
+                # Find Pim Parent ID column
+                ppid_col = None
+                for col in all_source.columns:
                     if 'pim parent id' in col.lower():
-                        ppid_col_source = col
+                        ppid_col = col
                         break
                 
-                if ppid_col_template is None:
-                    st.error("Could not find PPID column in template sheet!")
-                elif ppid_col_source is None:
+                if ppid_col is None:
                     st.error("Could not find 'Pim Parent ID' column in source sheets!")
                 else:
-                    st.success(f"Found PPID column in template: '{ppid_col_template}'")
-                    st.success(f"Found Pim Parent ID column in source: '{ppid_col_source}'")
+                    st.success(f"Found Pim Parent ID column: '{ppid_col}'")
                     
-                    # Remove duplicate PPIDs from source, keeping first occurrence
-                    combined_source_unique = combined_source.drop_duplicates(subset=[ppid_col_source], keep='first')
+                    # Get unique PPIDs
+                    unique_ppids = all_source[ppid_col].dropna().unique()
+                    st.info(f"Found {len(unique_ppids)} unique PPIDs")
                     
-                    st.info(f"Total source rows: {len(combined_source)}, After removing duplicates: {len(combined_source_unique)}")
+                    # Create output
+                    output_data = []
                     
-                    # Create a lookup dictionary from source data
-                    source_lookup = combined_source_unique.set_index(ppid_col_source)
-                    
-                    # Process each row in template
-                    processed_count = 0
-                    not_found_count = 0
-                    
-                    for idx, row in template_df.iterrows():
-                        ppid = row[ppid_col_template]
+                    for ppid in unique_ppids:
+                        matching_rows = all_source[all_source[ppid_col] == ppid]
                         
-                        # Skip if PPID is empty
-                        if pd.isna(ppid):
-                            continue
+                        row_data = {'PPID': ppid}
                         
-                        # Look up the PPID in source data
-                        if ppid in source_lookup.index:
-                            source_row = source_lookup.loc[ppid]
+                        for template_col, source_col in column_mapping.items():
+                            if template_col == 'PPID':
+                                continue
                             
-                            # Map each column
-                            for template_col, source_col in column_mapping.items():
-                                # Find matching column in template (case-insensitive)
-                                template_col_actual = None
-                                for col in template_df.columns:
-                                    if col.upper() == template_col.upper():
-                                        template_col_actual = col
-                                        break
-                                
-                                # Find matching column in source (case-insensitive)
-                                source_col_actual = None
-                                for col in source_lookup.columns:
-                                    if col.lower() == source_col.lower():
-                                        source_col_actual = col
-                                        break
-                                
-                                if template_col_actual and source_col_actual:
-                                    value = source_row[source_col_actual]
+                            # Find source column (case-insensitive)
+                            source_col_actual = None
+                            for col in all_source.columns:
+                                if col.lower() == source_col.lower():
+                                    source_col_actual = col
+                                    break
+                            
+                            if source_col_actual:
+                                values = matching_rows[source_col_actual].dropna()
+                                if len(values) > 0:
+                                    value = values.iloc[0]
                                     
-                                    # Special handling for BARCODE - convert to integer
-                                    if template_col.upper() == 'BARCODE' and pd.notna(value):
+                                    # BARCODE - convert to integer (remove decimals)
+                                    if template_col == 'BARCODE' and pd.notna(value):
                                         try:
                                             value = int(float(value))
                                         except (ValueError, TypeError):
                                             pass
                                     
-                                    template_df.at[idx, template_col_actual] = value
-                            
-                            processed_count += 1
-                        else:
-                            not_found_count += 1
+                                    row_data[template_col] = value
+                                else:
+                                    row_data[template_col] = None
+                            else:
+                                row_data[template_col] = None
+                        
+                        output_data.append(row_data)
                     
-                    st.success(f"✅ Processed {processed_count} rows successfully")
-                    if not_found_count > 0:
-                        st.warning(f"⚠️ {not_found_count} PPIDs not found in source sheets")
+                    # Create output dataframe with correct column order
+                    output_columns = ['PPID', 'SKU', 'BARCODE', 'DESCRIPTION', 'COLOUR', 'SIZE', 
+                                     'PRODUCT TYPE', 'DIVISION', 'BRAND', 'DEPARTMENT', 
+                                     'DEPARTMENT NUMBER', 'DIVISION NUMBER', 'STORE 301 ALLOCATION', 
+                                     'STORE 401 ALLOCATION', 'ITEM STORE FLAG', 'VPN PARENT']
+                    
+                    output_df = pd.DataFrame(output_data, columns=output_columns)
+                    
+                    st.success(f"✅ Created {len(output_df)} rows in output file")
                     
                     # Display preview of processed data
                     st.subheader("Preview of Processed Data")
-                    st.dataframe(template_df.head(20))
+                    st.dataframe(output_df)
                     
                     # Generate output filename with timestamp
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -162,7 +139,7 @@ if uploaded_file is not None:
                     # Create download button
                     output = io.BytesIO()
                     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                        template_df.to_excel(writer, index=False, sheet_name='Processed Data')
+                        output_df.to_excel(writer, index=False, sheet_name='Processed Data')
                     output.seek(0)
                     
                     st.download_button(
@@ -176,11 +153,24 @@ if uploaded_file is not None:
                     st.subheader("Processing Summary")
                     col1, col2, col3 = st.columns(3)
                     with col1:
-                        st.metric("Total Template Rows", len(template_df))
+                        st.metric("Total Unique PPIDs", len(unique_ppids))
                     with col2:
-                        st.metric("Successfully Matched", processed_count)
+                        st.metric("Output Rows", len(output_df))
                     with col3:
-                        st.metric("Not Found", not_found_count)
+                        st.metric("Source Sheets Used", len(source_sheets))
+                    
+                    # Show column mapping status
+                    st.subheader("Column Mapping Status")
+                    mapping_status = []
+                    for template_col, source_col in column_mapping.items():
+                        found = any(col.lower() == source_col.lower() for col in all_source.columns)
+                        status = "✅ Found" if found else "❌ Not Found"
+                        mapping_status.append({
+                            'Template Column': template_col,
+                            'Source Column': source_col,
+                            'Status': status
+                        })
+                    st.dataframe(pd.DataFrame(mapping_status))
                         
     except Exception as e:
         st.error(f"Error processing file: {str(e)}")
