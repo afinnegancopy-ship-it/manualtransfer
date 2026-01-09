@@ -2,7 +2,10 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 
-st.set_page_config(page_title="Brown Thomas Manual Transfer Processor", layout="wide")
+st.set_page_config(
+    page_title="Brown Thomas Manual Transfer Processor",
+    layout="wide"
+)
 
 st.title("Brown Thomas Manual Transfer File Processor")
 
@@ -12,30 +15,57 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file:
-    # Load all sheets
+
+    # Load workbook
     xls = pd.ExcelFile(uploaded_file)
 
-    if "brownthomas_new_template" not in xls.sheet_names:
-        st.error("Sheet 'brownthomas_new_template' not found.")
+    # Validate template sheet
+    TEMPLATE_SHEET = "brownthomas_new_template"
+    if TEMPLATE_SHEET not in xls.sheet_names:
+        st.error(f"Sheet '{TEMPLATE_SHEET}' not found.")
         st.stop()
 
     # Read template
-    template_df = pd.read_excel(xls, sheet_name="brownthomas_new_template")
+    template_df = pd.read_excel(xls, sheet_name=TEMPLATE_SHEET)
+    template_df.columns = template_df.columns.str.strip()
 
-    # Read other sheets
-    data_sheets = [
-        pd.read_excel(xls, sheet_name=s)
-        for s in xls.sheet_names
-        if s != "brownthomas_new_template"
-    ]
+    if "PPID" not in template_df.columns:
+        st.error("Template sheet must contain a 'PPID' column.")
+        st.stop()
 
-    # Combine the two data sheets
-    data_df = pd.concat(data_sheets, ignore_index=True)
+    # -----------------------------
+    # READ & CLEAN SOURCE SHEETS
+    # -----------------------------
+    data_frames = []
 
-    # Remove duplicate PPIDs in source data
+    for sheet in xls.sheet_names:
+        if sheet == TEMPLATE_SHEET:
+            continue
+
+        df = pd.read_excel(xls, sheet_name=sheet)
+        df.columns = df.columns.str.strip()
+
+        # Map Pim Parent ID → PPID
+        if "Pim Parent ID" in df.columns:
+            df = df.rename(columns={"Pim Parent ID": "PPID"})
+
+        if "PPID" not in df.columns:
+            st.warning(f"Sheet '{sheet}' skipped — no PPID/Pim Parent ID column.")
+            continue
+
+        data_frames.append(df)
+
+    if not data_frames:
+        st.error("No valid source sheets with PPID found.")
+        st.stop()
+
+    # Combine and deduplicate
+    data_df = pd.concat(data_frames, ignore_index=True)
     data_df = data_df.drop_duplicates(subset=["PPID"])
 
-    # Mapping between template columns and source headers
+    # -----------------------------
+    # COLUMN MAPPING
+    # -----------------------------
     column_map = {
         "SKU": "Retek ID",
         "BARCODE": "Barcode",
@@ -54,7 +84,9 @@ if uploaded_file:
         "VPN PARENT": "VPN Parent"
     }
 
-    # Merge template with source data using PPID
+    # -----------------------------
+    # MERGE USING PPID
+    # -----------------------------
     merged_df = template_df.merge(
         data_df,
         on="PPID",
@@ -62,28 +94,36 @@ if uploaded_file:
         suffixes=("", "_src")
     )
 
-    # Fill template columns from source columns
+    # Fill template columns
     for template_col, source_col in column_map.items():
-        if source_col in merged_df.columns:
+        if source_col in merged_df.columns and template_col in merged_df.columns:
             merged_df[template_col] = merged_df[source_col]
 
-    # Barcode cleanup: convert to number & remove decimals
+    # -----------------------------
+    # BARCODE CLEANUP
+    # -----------------------------
     if "BARCODE" in merged_df.columns:
         merged_df["BARCODE"] = (
-            pd.to_numeric(merged_df["BARCODE"], errors="coerce")
-            .astype("Int64")
+            merged_df["BARCODE"]
+            .astype(str)
+            .str.replace(r"\.0+$", "", regex=True)
         )
 
-    # Keep only original template columns
+    # Keep only template structure
     final_df = merged_df[template_df.columns]
 
-    # Generate output filename
+    # -----------------------------
+    # EXPORT FILE
+    # -----------------------------
     timestamp = datetime.now().strftime("%Y-%m-%d %H-%M-%S")
     output_filename = f"Processed Manual Transfer File - {timestamp}.xls"
 
-    # Save file
     with pd.ExcelWriter(output_filename, engine="openpyxl") as writer:
-        final_df.to_excel(writer, index=False, sheet_name="brownthomas_new_template")
+        final_df.to_excel(
+            writer,
+            index=False,
+            sheet_name=TEMPLATE_SHEET
+        )
 
     st.success("File processed successfully!")
 
