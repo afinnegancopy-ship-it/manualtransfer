@@ -16,10 +16,8 @@ uploaded_file = st.file_uploader(
 
 if uploaded_file:
 
-    # Load workbook
     xls = pd.ExcelFile(uploaded_file)
 
-    # Validate template sheet
     TEMPLATE_SHEET = "brownthomas_new_template"
     if TEMPLATE_SHEET not in xls.sheet_names:
         st.error(f"Sheet '{TEMPLATE_SHEET}' not found.")
@@ -30,11 +28,11 @@ if uploaded_file:
     template_df.columns = template_df.columns.str.strip()
 
     if "PPID" not in template_df.columns:
-        st.error("Template sheet must contain a 'PPID' column.")
+        st.error("Template must contain a 'PPID' column.")
         st.stop()
 
     # -----------------------------
-    # READ & CLEAN SOURCE SHEETS
+    # READ SOURCE SHEETS
     # -----------------------------
     data_frames = []
 
@@ -50,7 +48,7 @@ if uploaded_file:
             df = df.rename(columns={"Pim Parent ID": "PPID"})
 
         if "PPID" not in df.columns:
-            st.warning(f"Sheet '{sheet}' skipped — no PPID/Pim Parent ID column.")
+            st.warning(f"Sheet '{sheet}' skipped — no PPID found.")
             continue
 
         data_frames.append(df)
@@ -59,7 +57,6 @@ if uploaded_file:
         st.error("No valid source sheets with PPID found.")
         st.stop()
 
-    # Combine and deduplicate
     data_df = pd.concat(data_frames, ignore_index=True)
     data_df = data_df.drop_duplicates(subset=["PPID"])
 
@@ -84,24 +81,17 @@ if uploaded_file:
         "VPN PARENT": "VPN Parent"
     }
 
-    # -----------------------------
-    # MERGE USING PPID
-    # -----------------------------
     merged_df = template_df.merge(
         data_df,
         on="PPID",
-        how="left",
-        suffixes=("", "_src")
+        how="left"
     )
 
-    # Fill template columns
     for template_col, source_col in column_map.items():
-        if source_col in merged_df.columns and template_col in merged_df.columns:
+        if template_col in merged_df.columns and source_col in merged_df.columns:
             merged_df[template_col] = merged_df[source_col]
 
-    # -----------------------------
-    # BARCODE CLEANUP
-    # -----------------------------
+    # Barcode cleanup
     if "BARCODE" in merged_df.columns:
         merged_df["BARCODE"] = (
             merged_df["BARCODE"]
@@ -109,14 +99,13 @@ if uploaded_file:
             .str.replace(r"\.0+$", "", regex=True)
         )
 
-    # Keep only template structure
     final_df = merged_df[template_df.columns]
 
     # -----------------------------
-    # EXPORT FILE
+    # EXPORT (XLSX – SAFE)
     # -----------------------------
     timestamp = datetime.now().strftime("%Y-%m-%d %H-%M-%S")
-    output_filename = f"Processed Manual Transfer File - {timestamp}.xls"
+    output_filename = f"Processed Manual Transfer File - {timestamp}.xlsx"
 
     with pd.ExcelWriter(output_filename, engine="openpyxl") as writer:
         final_df.to_excel(
@@ -132,5 +121,5 @@ if uploaded_file:
             label="Download Processed Manual Transfer File",
             data=f,
             file_name=output_filename,
-            mime="application/vnd.ms-excel"
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
